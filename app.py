@@ -2,14 +2,24 @@ import tkinter as ttk
 from tkinter import messagebox, ttk
 import sqlite3
 import datetime
+import os
+import sys
+from PIL import Image, ImageTk
 
 DB_NAME = "pos_database.db"
+
+def resource_path(relative_path):
+    """ الحصول على المسار الصحيح للصورة والموارد عند تشغيل ملف الـ EXE """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # جدول المنتجات
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS products (
             barcode TEXT PRIMARY KEY,
@@ -19,7 +29,6 @@ def init_db():
         )
     ''')
     
-    # جدول الفواتير الرئيسية
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS sales (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,7 +37,6 @@ def init_db():
         )
     ''')
 
-    # جدول تفاصيل الفواتير (الأصناف داخل كل فاتورة)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS sale_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -42,7 +50,6 @@ def init_db():
         )
     ''')
     
-    # منتجات تجريبية
     cursor.execute("SELECT COUNT(*) FROM products")
     if cursor.fetchone()[0] == 0:
         sample_products = [
@@ -66,8 +73,19 @@ class POSApp:
         init_db()
         self.cart = []
         
+        # --- إضافة خلفية الصورة ---
+        bg_path = resource_path("bg.jpg")
+        if os.path.exists(bg_path):
+            try:
+                self.bg_image_original = Image.open(bg_path)
+                self.bg_photo = ImageTk.PhotoImage(self.bg_image_original.resize((1050, 700), Image.Resampling.LANCZOS))
+                self.bg_label = ttk.Label(self.root, image=self.bg_photo)
+                self.bg_label.place(x=0, y=0, relwidth=1, relheight=1)
+            except Exception as e:
+                print(f"خطأ في تحميل صورة الخلفية: {e}")
+
         self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=10)
         
         self.sale_tab = ttk.Frame(self.notebook)
         self.product_tab = ttk.Frame(self.notebook)
@@ -299,7 +317,6 @@ class POSApp:
         main_frame = ttk.Frame(self.invoices_tab, padding=10)
         main_frame.pack(fill="both", expand=True)
         
-        # قائمة الفواتير (يمين)
         left_frame = ttk.LabelFrame(main_frame, text="قائمة الفواتير المسجلة", padding=10)
         left_frame.pack(side="right", fill="both", expand=True, padx=5)
         
@@ -316,7 +333,6 @@ class POSApp:
         self.inv_tree.pack(fill="both", expand=True)
         self.inv_tree.bind("<<TreeviewSelect>>", self.on_invoice_select)
         
-        # تفاصيل الفاتورة والإجراءات (يسار)
         right_frame = ttk.LabelFrame(main_frame, text="تفاصيل الفاتورة المختارة", padding=10)
         right_frame.pack(side="left", fill="both", expand=True, padx=5)
         
@@ -384,13 +400,11 @@ class POSApp:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
         
-        # استرجاع الكميات إلى المخزن
         cursor.execute("SELECT barcode, qty FROM sale_items WHERE sale_id = ?", (sale_id,))
         items = cursor.fetchall()
         for barcode, qty in items:
             cursor.execute("UPDATE products SET stock = stock + ? WHERE barcode = ?", (qty, barcode))
             
-        # حذف الفاتورة وتفاصيلها
         cursor.execute("DELETE FROM sales WHERE id = ?", (sale_id,))
         cursor.execute("DELETE FROM sale_items WHERE sale_id = ?", (sale_id,))
         
