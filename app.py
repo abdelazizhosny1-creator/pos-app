@@ -73,13 +73,19 @@ class POSApp:
         init_db()
         self.cart = []
         
-        # --- إضافة خلفية الصورة ---
-        bg_path = resource_path("bg.jpg")
-        if os.path.exists(bg_path):
+        # --- البحث عن الصورة بأي امتداد متوفر ---
+        bg_path = None
+        for name in ["bg.jpeg", "bg.jpg", "bg.png"]:
+            path = resource_path(name)
+            if os.path.exists(path):
+                bg_path = path
+                break
+
+        if bg_path and os.path.exists(bg_path):
             try:
                 self.bg_image_original = Image.open(bg_path)
                 self.bg_photo = ImageTk.PhotoImage(self.bg_image_original.resize((1050, 700), Image.Resampling.LANCZOS))
-                self.bg_label = ttk.Label(self.root, image=self.bg_photo)
+                self.bg_label = tk.Label(self.root, image=self.bg_photo)
                 self.bg_label.place(x=0, y=0, relwidth=1, relheight=1)
             except Exception as e:
                 print(f"خطأ في تحميل صورة الخلفية: {e}")
@@ -125,7 +131,7 @@ class POSApp:
         self.cart_tree.heading("total", text="الإجمالي")
         
         self.cart_tree.column("barcode", width=120, anchor="center")
-        self.cart_tree.column("name", width=250, anchor="right")
+        self.cart_tree.column("name", width=250, anchor="e")
         self.cart_tree.column("price", width=100, anchor="center")
         self.cart_tree.column("qty", width=80, anchor="center")
         self.cart_tree.column("total", width=100, anchor="center")
@@ -157,14 +163,14 @@ class POSApp:
         
         if not product:
             messagebox.showwarning("غير موجود", "المنتج غير مسجل في قاعدة البيانات!")
-            self.barcode_entry.delete(0, ttk.END)
+            self.barcode_entry.delete(0, tk.END)
             return
             
         name, price, stock = product
         current_in_cart = sum(item['qty'] for item in self.cart if item['barcode'] == barcode)
         if current_in_cart + 1 > stock:
             messagebox.showerror("نفاد المخزون", f"الكمية المتاحة في المخزن هي {stock} فقط!")
-            self.barcode_entry.delete(0, ttk.END)
+            self.barcode_entry.delete(0, tk.END)
             return
 
         for item in self.cart:
@@ -176,7 +182,7 @@ class POSApp:
             self.cart.append({'barcode': barcode, 'name': name, 'price': price, 'qty': 1, 'total': price})
             
         self.update_cart_tree()
-        self.barcode_entry.delete(0, ttk.END)
+        self.barcode_entry.delete(0, tk.END)
 
     def update_cart_tree(self):
         for item in self.cart_tree.get_children():
@@ -257,7 +263,7 @@ class POSApp:
         self.prod_tree.heading("stock", text="الكمية المتاحة")
         
         self.prod_tree.column("barcode", width=150, anchor="center")
-        self.prod_tree.column("name", width=300, anchor="right")
+        self.prod_tree.column("name", width=300, anchor="e")
         self.prod_tree.column("price", width=120, anchor="center")
         self.prod_tree.column("stock", width=120, anchor="center")
         
@@ -295,10 +301,10 @@ class POSApp:
         conn.close()
 
         messagebox.showinfo("نجاح", "تم حفظ / تحديث المنتج بنجاح!")
-        self.p_barcode.delete(0, ttk.END)
-        self.p_name.delete(0, ttk.END)
-        self.p_price.delete(0, ttk.END)
-        self.p_stock.delete(0, ttk.END)
+        self.p_barcode.delete(0, tk.END)
+        self.p_name.delete(0, tk.END)
+        self.p_price.delete(0, tk.END)
+        self.p_stock.delete(0, tk.END)
         self.load_products_list()
 
     def load_products_list(self):
@@ -343,7 +349,7 @@ class POSApp:
         self.inv_items_tree.heading("qty", text="الكمية")
         self.inv_items_tree.heading("total", text="الإجمالي")
         
-        self.inv_items_tree.column("name", width=150, anchor="right")
+        self.inv_items_tree.column("name", width=150, anchor="e")
         self.inv_items_tree.column("price", width=70, anchor="center")
         self.inv_items_tree.column("qty", width=60, anchor="center")
         self.inv_items_tree.column("total", width=80, anchor="center")
