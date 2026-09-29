@@ -418,6 +418,6 @@ class POSApp:
             self.inv_items_tree.delete(item)
 
 if __name__ == "__main__":
-    root = ttk.Tk()
+    root = tk.Tk()
     app = POSApp(root)
     root.mainloop()
