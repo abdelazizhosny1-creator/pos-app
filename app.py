@@ -1,790 +1,485 @@
+import os
 import sqlite3
+import sys
 from datetime import datetime
-import tkinter.messagebox as messagebox
-from tkinter import ttk
+from tkinter import messagebox
 import customtkinter as ctk
 
-# ==================== إعدادات عامة ====================
+# إعداد مظهر التطبيق
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+
 DB_NAME = "pos_database.db"
 
 
+def resource_path(relative_path):
+  """إحضار المسار المطلق للملفات سواء عند التشغيل العادي أو من ملف EXE"""
+  try:
+    base_path = sys._MEIPASS
+  except Exception:
+    base_path = os.path.abspath(".")
+  return os.path.join(base_path, relative_path)
+
+
 def get_db_connection():
-    """إنشاء اتصال آمن بقاعدة البيانات"""
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    return conn
+  conn = sqlite3.connect(DB_NAME)
+  conn.row_factory = sqlite3.Row
+  return conn
 
 
-# ==================== قاعدة البيانات ====================
 def init_db():
+  conn = get_db_connection()
+  c = conn.cursor()
+
+  # جدول المنتجات
+  c.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            barcode TEXT UNIQUE,
+            name TEXT NOT NULL,
+            price REAL NOT NULL,
+            cost REAL DEFAULT 0,
+            quantity INTEGER DEFAULT 0,
+            category TEXT,
+            supplier_id INTEGER
+        )
+    """)
+
+  # جدول الفواتير
+  c.execute("""
+        CREATE TABLE IF NOT EXISTS invoices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_number TEXT UNIQUE,
+            date TEXT,
+            total REAL,
+            discount REAL DEFAULT 0,
+            status TEXT DEFAULT 'completed',
+            shift_id INTEGER,
+            user TEXT
+        )
+    """)
+
+  # تفاصيل الفواتير
+  c.execute("""
+        CREATE TABLE IF NOT EXISTS invoice_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id INTEGER,
+            product_id INTEGER,
+            barcode TEXT,
+            name TEXT,
+            quantity INTEGER,
+            price REAL,
+            total REAL
+        )
+    """)
+
+  # الفواتير المعلقة
+  c.execute("""
+        CREATE TABLE IF NOT EXISTS held_invoices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hold_time TEXT,
+            data TEXT
+        )
+    """)
+
+  # جدول الموردين
+  c.execute("""
+        CREATE TABLE IF NOT EXISTS suppliers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            phone TEXT,
+            notes TEXT
+        )
+    """)
+
+  # جدول المستخدمين
+  c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password TEXT,
+            role TEXT
+        )
+    """)
+
+  # إضافة مستخدم افتراضي إذا لم يوجد
+  c.execute("SELECT COUNT(*) FROM users")
+  if c.fetchone()[0] == 0:
+    c.execute(
+        "INSERT INTO users (username, password, role) VALUES ('admin',"
+        " 'admin', 'admin')"
+    )
+    c.execute(
+        "INSERT INTO users (username, password, role) VALUES ('cashier',"
+        " '1234', 'cashier')"
+    )
+
+  conn.commit()
+  conn.close()
+
+
+class POSApp(ctk.CTk):
+
+  def __init__(self):
+    super().__init__()
+    self.title("نظام إدارة المبيعات والمخزون - POS")
+    self.geometry("1100x700")
+
+    self.current_user = None
+    self.cart = []  # سلة المشتريات الحالية
+    self.held_invoices = []  # الفواتير المعلقة
+
+    self.show_login()
+
+  def clear_screen(self):
+    for widget in self.winfo_children():
+      widget.destroy()
+
+  # -------------------------------------------------------------
+  # شاشة تسجيل الدخول
+  # -------------------------------------------------------------
+  def show_login(self):
+    self.clear_screen()
+    frame = ctk.CTkFrame(self, width=350, height=400)
+    frame.place(relx=0.5, rely=0.5, anchor="center")
+
+    ctk.CTkLabel(
+        frame, text="تسجيل الدخول", font=ctk.CTkFont(size=22, weight="bold")
+    ).pack(pady=20)
+
+    self.user_entry = ctk.CTkEntry(
+        frame, placeholder_text="اسم المستخدم", width=250
+    )
+    self.user_entry.pack(pady=10)
+
+    self.pass_entry = ctk.CTkEntry(
+        frame, placeholder_text="كلمة المرور", show="*", width=250
+    )
+    self.pass_entry.pack(pady=10)
+
+    ctk.CTkButton(
+        frame, text="دخول", width=250, command=self.check_login
+    ).pack(pady=20)
+
+  def check_login(self):
+    username = self.user_entry.get()
+    password = self.pass_entry.get()
+
     conn = get_db_connection()
     c = conn.cursor()
-
     c.execute(
-        """CREATE TABLE IF NOT EXISTS products (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        barcode TEXT UNIQUE,
-        name TEXT NOT NULL,
-        price REAL NOT NULL,
-        cost REAL DEFAULT 0,
-        quantity INTEGER DEFAULT 0,
-        category TEXT,
-        supplier_id INTEGER)"""
+        "SELECT * FROM users WHERE username=? AND password=?",
+        (username, password),
     )
+    user = c.fetchone()
+    conn.close()
 
+    if user:
+      self.current_user = dict(user)
+      if self.current_user["role"] == "admin":
+        self.show_admin_dashboard()
+      else:
+        self.show_cashier_interface()
+    else:
+      messagebox.showerror(
+          "خطأ", "اسم المستخدم أو كلمة المرور غير صحيحة!"
+      )
+
+  # -------------------------------------------------------------
+  # واجهة الكاشير
+  # -------------------------------------------------------------
+  def show_cashier_interface(self):
+    self.clear_screen()
+
+    # شريط الاختصارات العلوي
+    top_bar = ctk.CTkFrame(self, height=40)
+    top_bar.pack(fill="x", padx=10, pady=5)
+
+    shortcuts_text = (
+        "F1: فاتورة جديدة | F2: تعليق الفاتورة | F3: الفواتير المعلقة | F4:"
+        " استعلام عن سعر | F5: طباعة وإتمام | Esc: خروج"
+    )
+    ctk.CTkLabel(
+        top_bar, text=shortcuts_text, font=ctk.CTkFont(size=12, weight="bold")
+    ).pack(side="left", padx=10)
+
+    # قسم الإدخال والبحث
+    input_frame = ctk.CTkFrame(self)
+    input_frame.pack(fill="x", padx=10, pady=5)
+
+    ctk.CTkLabel(input_frame, text="الباركود / اسم المنتج:").pack(
+        side="right", padx=5
+    )
+    self.barcode_entry = ctk.CTkEntry(input_frame, width=300)
+    self.barcode_entry.pack(side="right", padx=5)
+    self.barcode_entry.bind("<Return>", self.add_to_cart)
+    self.barcode_entry.focus()
+
+    # جدول السلة (قائمة المنتجات)
+    self.cart_frame = ctk.CTkScrollableFrame(self, height=350)
+    self.cart_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+    # شريط الإجمالي والأزرار
+    bottom_frame = ctk.CTkFrame(self)
+    bottom_frame.pack(fill="x", padx=10, pady=10)
+
+    self.total_label = ctk.CTkLabel(
+        bottom_frame,
+        text="الإجمالي: 0.00 ج.م",
+        font=ctk.CTkFont(size=24, weight="bold"),
+        text_color="green",
+    )
+    self.total_label.pack(side="right", padx=20)
+
+    ctk.CTkButton(
+        bottom_frame,
+        text="إتمام وطباعة (F5)",
+        fg_color="green",
+        command=self.checkout,
+    ).pack(side="left", padx=10)
+    ctk.CTkButton(
+        bottom_frame,
+        text="تعليق (F2)",
+        fg_color="orange",
+        command=self.hold_invoice,
+    ).pack(side="left", padx=10)
+    ctk.CTkButton(
+        bottom_frame,
+        text="استعلام (F4)",
+        fg_color="blue",
+        command=self.price_lookup,
+    ).pack(side="left", padx=10)
+
+    # ربط اختصارات الكيبورد
+    self.bind("<F1>", lambda e: self.reset_cart())
+    self.bind("<F2>", lambda e: self.hold_invoice())
+    self.bind("<F3>", lambda e: self.show_held_invoices())
+    self.bind("<F4>", lambda e: self.price_lookup())
+    self.bind("<F5>", lambda e: self.checkout())
+    self.bind("<Escape>", lambda e: self.show_login())
+
+    self.update_cart_display()
+
+  def add_to_cart(self, event=None):
+    query = self.barcode_entry.get().strip()
+    if not query:
+      return
+
+    conn = get_db_connection()
+    c = conn.cursor()
     c.execute(
-        """CREATE TABLE IF NOT EXISTS invoices (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        invoice_number TEXT UNIQUE,
-        date TEXT,
-        time TEXT,
-        total REAL,
-        discount REAL DEFAULT 0,
-        status TEXT DEFAULT 'completed',
-        shift TEXT,
-        user TEXT)"""
+        "SELECT * FROM products WHERE barcode=? OR name LIKE ?",
+        (query, f"%{query}%"),
     )
+    product = c.fetchone()
+    conn.close()
 
+    if product:
+      product = dict(product)
+      # التحقق مما إذا كان المنتج موجوداً بالسلة
+      for item in self.cart:
+        if item["id"] == product["id"]:
+          item["qty"] += 1
+          break
+      else:
+        self.cart.append({
+            "id": product["id"],
+            "barcode": product["barcode"],
+            "name": product["name"],
+            "price": product["price"],
+            "qty": 1,
+        })
+      self.barcode_entry.delete(0, "end")
+      self.update_cart_display()
+    else:
+      messagebox.showwarning("تنبيه", "المنتج غير موجود في قاعدة البيانات!")
+
+  def update_cart_display(self):
+    for widget in self.cart_frame.winfo_children():
+      widget.destroy()
+
+    total = 0.0
+    for idx, item in enumerate(self.cart):
+      item_total = item["price"] * item["qty"]
+      total += item_total
+
+      row = ctk.CTkFrame(self.cart_frame)
+      row.pack(fill="x", pady=2)
+
+      ctk.CTkLabel(row, text=item["name"], width=200, anchor="w").pack(
+          side="right", padx=5
+      )
+      ctk.CTkLabel(row, text=f"{item['price']} ج.م", width=100).pack(
+          side="right", padx=5
+      )
+      ctk.CTkLabel(row, text=f"الكمية: {item['qty']}", width=100).pack(
+          side="right", padx=5
+      )
+      ctk.CTkLabel(
+          row, text=f"{item_total:.2f} ج.م", width=100, font=ctk.CTkFont(weight="bold")
+      ).pack(side="right", padx=5)
+
+      ctk.CTkButton(
+          row,
+          text="X",
+          width=30,
+          fg_color="red",
+          command=lambda i=idx: self.remove_item(i),
+      ).pack(side="left", padx=5)
+
+    self.total_label.configure(text=f"الإجمالي: {total:.2f} ج.م")
+
+  def remove_item(self, index):
+    del self.cart[index]
+    self.update_cart_display()
+
+  def reset_cart(self):
+    self.cart = []
+    self.update_cart_display()
+
+  def price_lookup(self):
+    query = self.barcode_entry.get().strip()
+    if not query:
+      messagebox.showinfo("استعلام", "يرجى كتابة الباركود أو اسم المنتج أولاً")
+      return
+    conn = get_db_connection()
+    c = conn.cursor()
     c.execute(
-        """CREATE TABLE IF NOT EXISTS invoice_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        invoice_id INTEGER,
-        product_id INTEGER,
-        barcode TEXT,
-        name TEXT,
-        quantity INTEGER,
-        price REAL,
-        total REAL)"""
+        "SELECT * FROM products WHERE barcode=? OR name LIKE ?",
+        (query, f"%{query}%"),
     )
+    product = c.fetchone()
+    conn.close()
 
+    if product:
+      p = dict(product)
+      messagebox.showinfo(
+          "بيانات المنتج",
+          f"الاسم: {p['name']}\nالسعر: {p['price']} ج.م\nالمخزون"
+          f" المتبقي: {p['quantity']}",
+      )
+    else:
+      messagebox.showerror("خطأ", "المنتج غير موجود!")
+
+  def hold_invoice(self):
+    if not self.cart:
+      return
+    self.held_invoices.append(list(self.cart))
+    self.reset_cart()
+    messagebox.showinfo("تم", "تم تعليق الفاتورة بنجاح!")
+
+  def show_held_invoices(self):
+    if not self.held_invoices:
+      messagebox.showinfo("الفواتير المعلقة", "لا توجد فواتير معلقة حالياً.")
+      return
+    # استرجاع أول فاتورة معلقة كمثال
+    self.cart = self.held_invoices.pop(0)
+    self.update_cart_display()
+
+  def checkout(self):
+    if not self.cart:
+      return
+    total = sum(item["price"] * item["qty"] for item in self.cart)
+    inv_num = f"INV-{int(datetime.now().timestamp())}"
+
+    conn = get_db_connection()
+    c = conn.cursor()
     c.execute(
-        """CREATE TABLE IF NOT EXISTS suppliers (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        phone TEXT,
-        notes TEXT)"""
+        "INSERT INTO invoices (invoice_number, date, total, user) VALUES (?, ?,"
+        " ?, ?)",
+        (inv_num, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), total, "cashier"),
     )
+    inv_id = c.lastrowid
 
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE,
-        password TEXT,
-        role TEXT)"""
-    )
-
-    # إضافة مستخدمين افتراضيين عند التشغيل لأول مرة
-    c.execute("SELECT COUNT(*) FROM users")
-    if c.fetchone()[0] == 0:
-        c.execute(
-            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-            ("cashier", "123", "cashier"),
-        )
-        c.execute(
-            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
-            ("manager", "admin", "manager"),
-        )
-
-    # إضافة منتجات تجريبية
-    c.execute("SELECT COUNT(*) FROM products")
-    if c.fetchone()[0] == 0:
-        sample_products = [
-            ("1001", "ماء معدني", 1.5, 0.8, 100, "مشروبات"),
-            ("1002", "عصير برتقال", 3.0, 1.5, 80, "مشروبات"),
-            ("1003", "شيبس", 2.5, 1.2, 50, "سناكس"),
-            ("1004", "شوكولاتة", 4.0, 2.0, 60, "سناكس"),
-            ("1005", "خبز", 1.0, 0.5, 200, "مخبوزات"),
-        ]
-        c.executemany(
-            "INSERT INTO products (barcode, name, price, cost, quantity, category) VALUES (?, ?, ?, ?, ?, ?)",
-            sample_products,
-        )
+    for item in self.cart:
+      c.execute(
+          "INSERT INTO invoice_items (invoice_id, product_id, barcode, name,"
+          " quantity, price, total) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          (
+              inv_id,
+              item["id"],
+              item["barcode"],
+              item["name"],
+              item["qty"],
+              item["price"],
+              item["price"] * item["qty"],
+          ),
+      )
+      c.execute(
+          "UPDATE products SET quantity = quantity - ? WHERE id = ?",
+          (item["qty"], item["id"]),
+      )
 
     conn.commit()
     conn.close()
 
+    messagebox.showinfo(
+        "تمت العملية", f"تم طباعة الفاتورة رقم: {inv_num}\nالإجمالي: {total} ج.م"
+    )
+    self.reset_cart()
+
+  # -------------------------------------------------------------
+  # واجهة المدير
+  # -------------------------------------------------------------
+  def show_admin_dashboard(self):
+    self.clear_screen()
+
+    tabview = ctk.CTkTabview(self)
+    tabview.pack(fill="both", expand=True, padx=10, pady=10)
+
+    tabview.add("إدارة المنتجات والمخزون")
+    tabview.add("إدارة الموردين")
+    tabview.add("الفواتير والمبيعات")
+    tabview.add("التحصيل اليومي (الورديات)")
+
+    # 1. قسم المنتجات
+    prod_tab = tabview.tab("إدارة المنتجات والمخزون")
+    ctk.CTkLabel(
+        prod_tab,
+        text="إضافة / تعديل منتج",
+        font=ctk.CTkFont(size=16, weight="bold"),
+    ).pack(pady=5)
+
+    f1 = ctk.CTkFrame(prod_tab)
+    f1.pack(fill="x", padx=10, pady=5)
+
+    name_e = ctk.CTkEntry(f1, placeholder_text="اسم المنتج")
+    name_e.pack(side="right", padx=5)
+    bar_e = ctk.CTkEntry(f1, placeholder_text="الباركود")
+    bar_e.pack(side="right", padx=5)
+    price_e = ctk.CTkEntry(f1, placeholder_text="سعر البيع")
+    price_e.pack(side="right", padx=5)
+    qty_e = ctk.CTkEntry(f1, placeholder_text="الكمية")
+    qty_e.pack(side="right", padx=5)
+
+    def save_product():
+      conn = get_db_connection()
+      c = conn.cursor()
+      c.execute(
+          "INSERT INTO products (name, barcode, price, quantity) VALUES (?, ?,"
+          " ?, ?)",
+          (
+              name_e.get(),
+              bar_e.get(),
+              float(price_e.get() or 0),
+              int(qty_e.get() or 0),
+          ),
+      )
+      conn.commit()
+      conn.close()
+      messagebox.showinfo("تم", "تم حفظ المنتج بنجاح!")
+
+    ctk.CTkButton(
+        f1, text="حفظ المنتج", fg_color="green", command=save_product
+    ).pack(side="right", padx=10)
+
+    # زر الخروج والعودة لتسجيل الدخول
+    ctk.CTkButton(
+        self, text="تسجيل الخروج", fg_color="red", command=self.show_login
+    ).pack(pady=5)
 
-# ==================== نافذة تسجيل الدخول ====================
-class LoginWindow(ctk.CTk):
 
-    def __init__(self):
-        super().__init__()
-        self.title("نظام نقاط البيع - تسجيل الدخول")
-        self.geometry("400x350")
-        self.resizable(False, False)
-
-        ctk.CTkLabel(
-            self, text="تسجيل الدخول", font=("Arial", 24, "bold")
-        ).pack(pady=20)
-
-        self.username = ctk.CTkEntry(
-            self, placeholder_text="اسم المستخدم", width=250
-        )
-        self.username.pack(pady=10)
-
-        self.password = ctk.CTkEntry(
-            self, placeholder_text="كلمة المرور", show="*", width=250
-        )
-        self.password.pack(pady=10)
-
-        ctk.CTkButton(
-            self, text="دخول", command=self.login, width=200, height=35
-        ).pack(pady=20)
-
-        ctk.CTkLabel(
-            self,
-            text="كاشير: cashier / 123\nمدير: manager / admin",
-            font=("Arial", 12),
-            text_color="gray",
-        ).pack()
-
-    def login(self):
-        user = self.username.get().strip()
-        pwd = self.password.get().strip()
-
-        if not user or not pwd:
-            messagebox.showwarning("تنبيه", "يرجى إدخال اسم المستخدم وكلمة المرور")
-            return
-
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute(
-            "SELECT role FROM users WHERE username=? AND password=?",
-            (user, pwd),
-        )
-        result = c.fetchone()
-        conn.close()
-
-        if result:
-            self.destroy()
-            role = result["role"]
-            if role == "cashier":
-                CashierApp(user).mainloop()
-            else:
-                ManagerApp(user).mainloop()
-        else:
-            messagebox.showerror("خطأ", "اسم المستخدم أو كلمة المرور غير صحيحة")
-
-
-# ==================== واجهة الكاشير ====================
-class CashierApp(ctk.CTk):
-
-    def __init__(self, username):
-        super().__init__()
-        self.username = username
-        self.title(f"واجهة الكاشير - {username}")
-        self.geometry("1200x750")
-        self.state("zoomed")
-
-        self.cart = []
-        self.suspended_invoices = {}
-
-        self.create_widgets()
-        self.bind_shortcuts()
-
-    def create_widgets(self):
-        # الشريط العلوي
-        top_frame = ctk.CTkFrame(self)
-        top_frame.pack(fill="x", padx=10, pady=5)
-
-        ctk.CTkLabel(top_frame, text="مسح الباركود:", font=("Arial", 16)).pack(
-            side="left", padx=10
-        )
-
-        self.barcode_entry = ctk.CTkEntry(
-            top_frame, width=220, font=("Arial", 16)
-        )
-        self.barcode_entry.pack(side="left", padx=5)
-        self.barcode_entry.bind("<Return>", self.scan_product)
-        self.barcode_entry.focus()
-
-        ctk.CTkButton(
-            top_frame,
-            text="استعلام سعر (F5)",
-            command=self.price_inquiry,
-            width=130,
-        ).pack(side="left", padx=5)
-        ctk.CTkButton(
-            top_frame,
-            text="فاتورة جديدة (F1)",
-            command=self.new_invoice,
-            width=130,
-        ).pack(side="left", padx=5)
-        ctk.CTkButton(
-            top_frame,
-            text="تعليق فاتورة (F2)",
-            command=self.suspend_invoice,
-            width=130,
-        ).pack(side="left", padx=5)
-        ctk.CTkButton(
-            top_frame,
-            text="استرجاع معلقة (F3)",
-            command=self.resume_invoice,
-            width=130,
-        ).pack(side="left", padx=5)
-
-        # جدول سلة المشتريات
-        self.tree_frame = ctk.CTkFrame(self)
-        self.tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
-
-        columns = ("barcode", "name", "qty", "price", "total")
-        self.tree = ttk.Treeview(
-            self.tree_frame, columns=columns, show="headings", height=20
-        )
-
-        self.tree.heading("barcode", text="الباركود")
-        self.tree.heading("name", text="اسم المنتج")
-        self.tree.heading("qty", text="الكمية")
-        self.tree.heading("price", text="السعر")
-        self.tree.heading("total", text="الإجمالي")
-
-        self.tree.column("barcode", width=120, anchor="center")
-        self.tree.column("name", width=300, anchor="e")
-        self.tree.column("qty", width=80, anchor="center")
-        self.tree.column("price", width=100, anchor="center")
-        self.tree.column("total", width=100, anchor="center")
-
-        self.tree.pack(fill="both", expand=True, side="left")
-
-        scrollbar = ttk.Scrollbar(
-            self.tree_frame, orient="vertical", command=self.tree.yview
-        )
-        scrollbar.pack(side="right", fill="y")
-        self.tree.configure(yscrollcommand=scrollbar.set)
-
-        # الشريط السفلي
-        bottom_frame = ctk.CTkFrame(self)
-        bottom_frame.pack(fill="x", padx=10, pady=10)
-
-        self.total_label = ctk.CTkLabel(
-            bottom_frame, text="الإجمالي: 0.00", font=("Arial", 28, "bold")
-        )
-        self.total_label.pack(side="left", padx=20)
-
-        ctk.CTkButton(
-            bottom_frame,
-            text="خروج (Esc)",
-            command=self.quit_app,
-            width=100,
-            fg_color="gray",
-        ).pack(side="right", padx=5)
-        ctk.CTkButton(
-            bottom_frame,
-            text="إنهاء الفاتورة",
-            command=self.complete_invoice,
-            fg_color="green",
-            width=140,
-        ).pack(side="right", padx=5)
-        ctk.CTkButton(
-            bottom_frame,
-            text="طباعة (F4)",
-            command=self.print_invoice,
-            width=120,
-        ).pack(side="right", padx=5)
-        ctk.CTkButton(
-            bottom_frame,
-            text="حذف منتج",
-            command=self.remove_item,
-            fg_color="red",
-            width=110,
-        ).pack(side="right", padx=5)
-
-    def bind_shortcuts(self):
-        self.bind("<F1>", lambda e: self.new_invoice())
-        self.bind("<F2>", lambda e: self.suspend_invoice())
-        self.bind("<F3>", lambda e: self.resume_invoice())
-        self.bind("<F4>", lambda e: self.print_invoice())
-        self.bind("<F5>", lambda e: self.price_inquiry())
-        self.bind("<Escape>", lambda e: self.quit_app())
-
-    def scan_product(self, event=None):
-        barcode = self.barcode_entry.get().strip()
-        if not barcode:
-            return
-
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute(
-            "SELECT id, name, price, quantity FROM products WHERE barcode=?",
-            (barcode,),
-        )
-        product = c.fetchone()
-        conn.close()
-
-        if product:
-            pid, name, price, stock = (
-                product["id"],
-                product["name"],
-                product["price"],
-                product["quantity"],
-            )
-
-            if stock <= 0:
-                messagebox.showwarning("تنبيه", "المنتج غير متوفر في المخزون")
-                self.barcode_entry.delete(0, "end")
-                return
-
-            # فحص إذا كان المنتج موجوداً مسبقاً بالسلة
-            for item in self.cart:
-                if item["barcode"] == barcode:
-                    if item["qty"] + 1 > stock:
-                        messagebox.showwarning(
-                            "تنبيه", "الكمية المطلوبة تتجاوز المخزون المتوفر!"
-                        )
-                        self.barcode_entry.delete(0, "end")
-                        return
-                    item["qty"] += 1
-                    item["total"] = item["qty"] * item["price"]
-                    self.refresh_cart()
-                    self.barcode_entry.delete(0, "end")
-                    return
-
-            # إضافة منتج جديد بالسلة
-            self.cart.append(
-                {
-                    "product_id": pid,
-                    "barcode": barcode,
-                    "name": name,
-                    "qty": 1,
-                    "price": price,
-                    "total": price,
-                }
-            )
-            self.refresh_cart()
-        else:
-            messagebox.showerror("خطأ", "المنتج غير موجود")
-
-        self.barcode_entry.delete(0, "end")
-
-    def refresh_cart(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-
-        total = 0.0
-        for item in self.cart:
-            self.tree.insert(
-                "",
-                "end",
-                values=(
-                    item["barcode"],
-                    item["name"],
-                    item["qty"],
-                    f"{item['price']:.2f}",
-                    f"{item['total']:.2f}",
-                ),
-            )
-            total += item["total"]
-
-        self.total_label.configure(text=f"الإجمالي: {total:.2f}")
-
-    def remove_item(self):
-        selected = self.tree.selection()
-        if selected:
-            index = self.tree.index(selected[0])
-            del self.cart[index]
-            self.refresh_cart()
-        else:
-            messagebox.showinfo("تنبيه", "حدد منتجاً لحذفه من السلة")
-
-    def new_invoice(self):
-        if self.cart:
-            if not messagebox.askyesno(
-                "تأكيد", "هل تريد إلغاء الفاتورة الحالية؟"
-            ):
-                return
-        self.cart = []
-        self.refresh_cart()
-        self.barcode_entry.focus()
-
-    def suspend_invoice(self):
-        if not self.cart:
-            messagebox.showinfo("تنبيه", "لا توجد منتجات لتعليقها")
-            return
-
-        key = f"فاتورة_{datetime.now().strftime('%H:%M:%S')}"
-        self.suspended_invoices[key] = self.cart.copy()
-        self.cart = []
-        self.refresh_cart()
-        messagebox.showinfo("تم", f"تم تعليق الفاتورة بنجاح باسم: {key}")
-
-    def resume_invoice(self):
-        if not self.suspended_invoices:
-            messagebox.showinfo("تنبيه", "لا توجد فواتير معلقة")
-            return
-
-        win = ctk.CTkToplevel(self)
-        win.title("الفواتير المعلقة")
-        win.geometry("350x200")
-        win.grab_set()
-
-        ctk.CTkLabel(win, text="اختر الفاتورة المعلقة:").pack(pady=10)
-
-        options = list(self.suspended_invoices.keys())
-        selected_option = ctk.StringVar(value=options[0])
-
-        option_menu = ctk.CTkOptionMenu(
-            win, variable=selected_option, values=options
-        )
-        option_menu.pack(pady=10)
-
-        def load():
-            key = selected_option.get()
-            if key in self.suspended_invoices:
-                self.cart = self.suspended_invoices.pop(key)
-                self.refresh_cart()
-                win.destroy()
-
-        ctk.CTkButton(win, text="استرجاع الفاتورة", command=load).pack(pady=15)
-
-    def complete_invoice(self):
-        if not self.cart:
-            messagebox.showinfo("تنبيه", "الفاتورة فارغة")
-            return
-
-        total = sum(item["total"] for item in self.cart)
-        now = datetime.now()
-        invoice_number = now.strftime("%Y%m%d%H%M%S")
-
-        conn = get_db_connection()
-        c = conn.cursor()
-
-        try:
-            c.execute(
-                """INSERT INTO invoices (invoice_number, date, time, total, status, shift, user) 
-                         VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    invoice_number,
-                    now.strftime("%Y-%m-%d"),
-                    now.strftime("%H:%M:%S"),
-                    total,
-                    "completed",
-                    "صباحية",
-                    self.username,
-                ),
-            )
-
-            invoice_id = c.lastrowid
-
-            for item in self.cart:
-                c.execute(
-                    """INSERT INTO invoice_items (invoice_id, product_id, barcode, name, quantity, price, total) 
-                             VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        invoice_id,
-                        item["product_id"],
-                        item["barcode"],
-                        item["name"],
-                        item["qty"],
-                        item["price"],
-                        item["total"],
-                    ),
-                )
-
-                c.execute(
-                    "UPDATE products SET quantity = quantity - ? WHERE id = ?",
-                    (item["qty"], item["product_id"]),
-                )
-
-            conn.commit()
-            messagebox.showinfo(
-                "نجاح",
-                f"تم حفظ الفاتورة بنجاح!\nرقم الفاتورة: {invoice_number}\nالإجمالي: {total:.2f}",
-            )
-            self.cart = []
-            self.refresh_cart()
-        except Exception as e:
-            conn.rollback()
-            messagebox.showerror(
-                "خطأ في قاعدة البيانات", f"حدث خطأ أثناء حفظ الفاتورة: {e}"
-            )
-        finally:
-            conn.close()
-
-    def print_invoice(self):
-        if not self.cart:
-            messagebox.showinfo("تنبيه", "لا توجد فاتورة للطباعة")
-            return
-        messagebox.showinfo(
-            "طباعة", "تم إرسال الفاتورة للطابعة (وظيفة محاكاة للطباعة)"
-        )
-
-    def price_inquiry(self):
-        barcode = self.barcode_entry.get().strip()
-        if not barcode:
-            messagebox.showinfo("استعلام", "أدخل الباركود في الحقل أولاً")
-            return
-
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute(
-            "SELECT name, price, quantity FROM products WHERE barcode=?",
-            (barcode,),
-        )
-        product = c.fetchone()
-        conn.close()
-
-        if product:
-            messagebox.showinfo(
-                "استعلام عن منتج",
-                f"اسم المنتج: {product['name']}\nالسعر: {product['price']:.2f}\nالكمية المتبقية: {product['quantity']}",
-            )
-        else:
-            messagebox.showerror("خطأ", "المنتج غير موجود")
-
-        self.barcode_entry.delete(0, "end")
-
-    def quit_app(self):
-        if messagebox.askyesno("خروج", "هل تريد الخروج من برنامج الكاشير؟"):
-            self.destroy()
-
-
-# ==================== واجهة المدير ====================
-class ManagerApp(ctk.CTk):
-
-    def __init__(self, username):
-        super().__init__()
-        self.username = username
-        self.title(f"لوحة تحكم المدير - {username}")
-        self.geometry("1300x800")
-        self.state("zoomed")
-
-        self.create_widgets()
-
-    def create_widgets(self):
-        sidebar = ctk.CTkFrame(self, width=200)
-        sidebar.pack(side="left", fill="y", padx=5, pady=5)
-
-        ctk.CTkLabel(
-            sidebar, text="لوحة التحكم", font=("Arial", 20, "bold")
-        ).pack(pady=20)
-
-        buttons = [
-            ("المنتجات", self.show_products),
-            ("سجل الفواتير", self.show_invoices),
-            ("حالة المخزون", self.show_stock),
-            ("الموردين", self.show_suppliers),
-            ("المبيعات اليومية", self.show_daily_sales),
-            ("خروج", self.quit_app),
-        ]
-
-        for text, cmd in buttons:
-            ctk.CTkButton(
-                sidebar, text=text, command=cmd, width=180, height=40
-            ).pack(pady=8)
-
-        self.content = ctk.CTkFrame(self)
-        self.content.pack(side="right", fill="both", expand=True, padx=5, pady=5)
-
-        self.show_products()
-
-    def clear_content(self):
-        for widget in self.content.winfo_children():
-            widget.destroy()
-
-    def show_products(self):
-        self.clear_content()
-        ctk.CTkLabel(
-            self.content, text="إدارة المنتجات", font=("Arial", 22, "bold")
-        ).pack(pady=10)
-
-        form = ctk.CTkFrame(self.content)
-        form.pack(fill="x", padx=20, pady=10)
-
-        self.p_barcode = ctk.CTkEntry(form, placeholder_text="الباركود")
-        self.p_barcode.grid(row=0, column=0, padx=5, pady=5)
-
-        self.p_name = ctk.CTkEntry(
-            form, placeholder_text="اسم المنتج", width=180
-        )
-        self.p_name.grid(row=0, column=1, padx=5, pady=5)
-
-        self.p_price = ctk.CTkEntry(form, placeholder_text="السعر")
-        self.p_price.grid(row=0, column=2, padx=5, pady=5)
-
-        self.p_qty = ctk.CTkEntry(form, placeholder_text="الكمية")
-        self.p_qty.grid(row=0, column=3, padx=5, pady=5)
-
-        ctk.CTkButton(
-            form, text="إضافة منتج", command=self.add_product, fg_color="green"
-        ).grid(row=0, column=4, padx=10)
-
-        columns = ("id", "barcode", "name", "price", "qty")
-        self.product_tree = ttk.Treeview(
-            self.content, columns=columns, show="headings"
-        )
-
-        self.product_tree.heading("id", text="المعرف")
-        self.product_tree.heading("barcode", text="الباركود")
-        self.product_tree.heading("name", text="اسم المنتج")
-        self.product_tree.heading("price", text="السعر")
-        self.product_tree.heading("qty", text="الكمية")
-
-        for col in columns:
-            self.product_tree.column(col, anchor="center")
-
-        self.product_tree.pack(fill="both", expand=True, padx=20, pady=10)
-        self.load_products()
-
-    def load_products(self):
-        for i in self.product_tree.get_children():
-            self.product_tree.delete(i)
-
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute("SELECT id, barcode, name, price, quantity FROM products")
-        for row in c.fetchall():
-            self.product_tree.insert("", "end", values=tuple(row))
-        conn.close()
-
-    def add_product(self):
-        barcode = self.p_barcode.get().strip()
-        name = self.p_name.get().strip()
-        price = self.p_price.get().strip()
-        qty = self.p_qty.get().strip()
-
-        if not barcode or not name or not price or not qty:
-            messagebox.showwarning("تنبيه", "جميع الحقول مطلوبة!")
-            return
-
-        try:
-            conn = get_db_connection()
-            c = conn.cursor()
-            c.execute(
-                "INSERT INTO products (barcode, name, price, quantity) VALUES (?, ?, ?, ?)",
-                (barcode, name, float(price), int(qty)),
-            )
-            conn.commit()
-            conn.close()
-
-            messagebox.showinfo("نجاح", "تمت إضافة المنتج بنجاح")
-
-            self.p_barcode.delete(0, "end")
-            self.p_name.delete(0, "end")
-            self.p_price.delete(0, "end")
-            self.p_qty.delete(0, "end")
-
-            self.load_products()
-        except sqlite3.IntegrityError:
-            messagebox.showerror("خطأ", "رمز الباركود موجود مسبقاً!")
-        except ValueError:
-            messagebox.showerror("خطأ", "تأكد من إدخال قيم صالحة للسعر والكمية")
-
-    def show_invoices(self):
-        self.clear_content()
-        ctk.CTkLabel(
-            self.content, text="سجل الفواتير", font=("Arial", 22, "bold")
-        ).pack(pady=10)
-
-        columns = ("id", "number", "date", "time", "total", "user")
-        tree = ttk.Treeview(self.content, columns=columns, show="headings")
-
-        tree.heading("id", text="#")
-        tree.heading("number", text="رقم الفاتورة")
-        tree.heading("date", text="التاريخ")
-        tree.heading("time", text="الوقت")
-        tree.heading("total", text="الإجمالي")
-        tree.heading("user", text="المستخدم")
-
-        for col in columns:
-            tree.column(col, anchor="center")
-
-        tree.pack(fill="both", expand=True, padx=20, pady=10)
-
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute(
-            "SELECT id, invoice_number, date, time, total, user FROM invoices ORDER BY id DESC"
-        )
-        for row in c.fetchall():
-            tree.insert("", "end", values=tuple(row))
-        conn.close()
-
-    def show_stock(self):
-        self.clear_content()
-        ctk.CTkLabel(
-            self.content,
-            text="تقرير المخزون الحالي",
-            font=("Arial", 22, "bold"),
-        ).pack(pady=10)
-
-        columns = ("barcode", "name", "qty", "price")
-        tree = ttk.Treeview(self.content, columns=columns, show="headings")
-
-        tree.heading("barcode", text="الباركود")
-        tree.heading("name", text="اسم المنتج")
-        tree.heading("qty", text="الكمية المتبقية")
-        tree.heading("price", text="سعر البيع")
-
-        for col in columns:
-            tree.column(col, anchor="center")
-
-        tree.pack(fill="both", expand=True, padx=20, pady=10)
-
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute(
-            "SELECT barcode, name, quantity, price FROM products ORDER BY quantity ASC"
-        )
-        for row in c.fetchall():
-            tree.insert("", "end", values=tuple(row))
-        conn.close()
-
-    def show_suppliers(self):
-        self.clear_content()
-        ctk.CTkLabel(
-            self.content, text="قائمة الموردين", font=("Arial", 22, "bold")
-        ).pack(pady=10)
-        ctk.CTkLabel(
-            self.content,
-            text="سيتم إضافة هذه الميزة في التحديث القادم.",
-            font=("Arial", 16),
-            text_color="gray",
-        ).pack(pady=50)
-
-    def show_daily_sales(self):
-        self.clear_content()
-        ctk.CTkLabel(
-            self.content, text="التحصيل اليومي", font=("Arial", 22, "bold")
-        ).pack(pady=10)
-
-        today = datetime.now().strftime("%Y-%m-%d")
-
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute(
-            "SELECT COUNT(*), SUM(total) FROM invoices WHERE date=? AND status='completed'",
-            (today,),
-        )
-        row = c.fetchone()
-        conn.close()
-
-        count = row[0] if row else 0
-        total = row[1] if row and row[1] is not None else 0.0
-
-        card = ctk.CTkFrame(self.content)
-        card.pack(pady=30, padx=30, fill="x")
-
-        ctk.CTkLabel(
-            card, text=f"تاريخ اليوم: {today}", font=("Arial", 18)
-        ).pack(pady=10)
-        ctk.CTkLabel(
-            card, text=f"عدد الفواتير المُصدرة: {count}", font=("Arial", 18)
-        ).pack(pady=5)
-        ctk.CTkLabel(
-            card,
-            text=f"إجمالي مبيعات اليوم: {total:.2f} $",
-            font=("Arial", 26, "bold"),
-            text_color="#2FA572",
-        ).pack(pady=15)
-
-    def quit_app(self):
-        self.destroy()
-
-
-# ==================== تشغيل البرنامج ====================
 if __name__ == "__main__":
-    init_db()
-    app = LoginWindow()
-    app.mainloop()
+  init_db()
+  app = POSApp()
+  app.mainloop()
