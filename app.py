@@ -41,7 +41,7 @@ def init_db():
     cursor.execute("SELECT COUNT(*) FROM products")
     if cursor.fetchone()[0] == 0:
         cursor.execute("INSERT INTO products VALUES ('101', 'منتج A', 50.0, 100, 'مورد العالمية')")
-        cursor.execute("INSERT INTO products VALUES ('102', 'منتج B', 25.5, 50, 'مورد النور')")
+        cursor.execute("INSERT INTO products VALUES ('102', 'منتج B', 25.5, 3, 'مورد النور')")  # منتج بقيمة مخزون منخفضة للتجربة
         cursor.execute("INSERT INTO suppliers (name, phone) VALUES ('مورد العالمية', '01000000000')")
         cursor.execute("INSERT INTO suppliers (name, phone) VALUES ('مورد النور', '01100000000')")
         
@@ -56,6 +56,9 @@ class POSApp(tk.Tk):
         super().__init__()
         self.title("نظام POS المبيعات والمخازن المتكامل")
         self.geometry("1024x700")
+        
+        # كلمة مرور المدير الافتراضية
+        self.admin_password = "123"
         
         # قائمة الفواتير المعلقة
         self.held_invoices = []
@@ -72,11 +75,14 @@ class POSApp(tk.Tk):
         self.admin_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.admin_frame, text="لوحة التحكم والمدير")
         
+        # حماية تبويب المدير بكلمة مرور عند التنقل
+        self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_change)
+        
         # بناء الواجهات
         self.build_cashier_ui()
         self.build_admin_ui()
         
-        #ربط اختصارات لوحة المفاتيح
+        # ربط اختصارات لوحة المفاتيح
         self.bind("<F1>", lambda e: self.new_invoice())
         self.bind("<F2>", lambda e: self.hold_invoice())
         self.bind("<F3>", lambda e: self.retrieve_held_invoice())
@@ -84,7 +90,19 @@ class POSApp(tk.Tk):
         self.bind("<F5>", lambda e: self.print_invoice())
         self.bind("<Escape>", lambda e: self.exit_app())
 
-    # ==================== 3. واجهة الكاشير (الجزء الأول) ====================
+    def on_tab_change(self, event):
+        selected_tab = self.notebook.select()
+        tab_text = self.notebook.tab(selected_tab, "text")
+        
+        if tab_text == "لوحة التحكم والمدير":
+            password = simpledialog.askstring("صلاحيات المدير", "ادخل كلمة مرور المدير:", show='*')
+            if password != self.admin_password:
+                messagebox.showerror("خطأ", "كلمة المرور غير صحيحة!")
+                self.notebook.select(self.cashier_frame)
+            else:
+                self.refresh_admin_data()
+
+    # ==================== 3. واجهة الكاشير ====================
     def build_cashier_ui(self):
         # شريط الاختصارات العلوي
         btn_frame = ttk.Frame(self.cashier_frame)
@@ -133,7 +151,6 @@ class POSApp(tk.Tk):
 
         if product:
             name, price = product
-            # فحص إذا كان الصنف موجود بالجدول مسبقاً
             for item in self.cart_tree.get_children():
                 vals = self.cart_tree.item(item, "values")
                 if vals[0] == barcode:
@@ -199,7 +216,6 @@ class POSApp(tk.Tk):
 
         grand_total = sum(float(self.cart_tree.item(i, "values")[4]) for i in items)
         
-        # حفظ الفاتورة في المبيعات وتحديث المخزون
         conn = sqlite3.connect("pos_system.db")
         cursor = conn.cursor()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -215,13 +231,12 @@ class POSApp(tk.Tk):
 
         messagebox.showinfo("طباعة الفاتورة", f"تم إغلاق الفاتورة بقيمة {grand_total:.2f} ج.م\nوفتح درج النقدية تلقائياً.")
         self.new_invoice()
-        self.refresh_admin_data()
 
     def exit_app(self):
         if messagebox.askyesno("خروج", "هل تريد الخروج من البرنامج؟"):
             self.destroy()
 
-    # ==================== 4. واجهة المدير والتحصيل (الجزء الثاني) ====================
+    # ==================== 4. واجهة المدير والنواقص ====================
     def build_admin_ui(self):
         admin_notebook = ttk.Notebook(self.admin_frame)
         admin_notebook.pack(fill="both", expand=True)
@@ -235,10 +250,13 @@ class POSApp(tk.Tk):
             self.stock_tree.heading(col, text=txt)
         self.stock_tree.pack(fill="both", expand=True, padx=5, pady=5)
 
-        btn_add = ttk.Button(stock_tab, text="إضافة / تعديل منتج", command=self.add_product_dialog)
-        btn_add.pack(pady=5)
+        stock_btn_frame = ttk.Frame(stock_tab)
+        stock_btn_frame.pack(pady=5)
 
-        # تبويب التحصيل اليومي / الورديات
+        ttk.Button(stock_btn_frame, text="إضافة / تعديل منتج", command=self.add_product_dialog).pack(side="left", padx=5)
+        ttk.Button(stock_btn_frame, text="⚠️ فحص النواقص", command=self.check_low_stock).pack(side="left", padx=5)
+
+        # تبويب التحصيل اليومي والورديات
         reports_tab = ttk.Frame(admin_notebook)
         admin_notebook.add(reports_tab, text="التحصيل اليومي والورديات")
 
@@ -246,8 +264,6 @@ class POSApp(tk.Tk):
         self.report_label.pack(pady=20)
 
         ttk.Button(reports_tab, text="تحديث تقرير الوردية", command=self.refresh_admin_data).pack()
-
-        self.refresh_admin_data()
 
     def add_product_dialog(self):
         barcode = simpledialog.askstring("منتج جديد", "ادخل الباركويد:")
@@ -264,8 +280,23 @@ class POSApp(tk.Tk):
         conn.close()
         self.refresh_admin_data()
 
+    def check_low_stock(self):
+        # فحص المنتجات التي يقل مخزونها عن 5 قطع
+        conn = sqlite3.connect("pos_system.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT barcode, name, stock FROM products WHERE stock <= 5")
+        low_stock_items = cursor.fetchall()
+        conn.close()
+
+        if low_stock_items:
+            msg = "⚠️ قائمة المنتجات القريبة من النفاد (النواقص):\n\n"
+            for item in low_stock_items:
+                msg += f"• {item[1]} (باركويد: {item[0]}) - المتبقي: {item[2]} فقط\n"
+            messagebox.showwarning("تنبيه النواقص", msg)
+        else:
+            messagebox.showinfo("حالة المخزون", "جميع المنتجات متوفرة بكميات كافية.")
+
     def refresh_admin_data(self):
-        # تحديث شجرة المخزون
         for i in self.stock_tree.get_children():
             self.stock_tree.delete(i)
         
@@ -275,7 +306,6 @@ class POSApp(tk.Tk):
         for row in cursor.fetchall():
             self.stock_tree.insert("", "end", values=row)
 
-        # تحديث المبيعات والوردية
         cursor.execute("SELECT COUNT(*), SUM(total_amount) FROM sales")
         sales_data = cursor.fetchone()
         count = sales_data[0] or 0
