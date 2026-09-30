@@ -3,6 +3,8 @@ name: Build Windows EXE
 on:
   push:
     branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
 
 jobs:
   build:
@@ -29,4 +31,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: POS-Windows-App
-        path: dist/*.exe
+        path: dist/app.exe
